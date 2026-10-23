@@ -1,0 +1,54 @@
+# Git defaults layer (linked to ~/.config/git/presets). Independent of the hook
+# profile. Skip with `bootstrap.sh --no-config`. Rationale: docs/GIT-CONFIG.md.
+# Needs git >= 2.35 (merge.conflictStyle=zdiff3); newer keys are ignored by
+# older git.
+
+[init]
+	defaultBranch = main
+
+[core]
+	excludesFile = ~/.config/git/ignore
+	attributesFile = ~/.config/git/attributes
+	untrackedCache = true
+	quotePath = false
+
+[pull]
+	ff = only
+[fetch]
+	prune = true
+	pruneTags = false
+	fsckObjects = true
+	writeCommitGraph = true
+[push]
+	default = simple
+	autoSetupRemote = true
+	followTags = true
+[transfer]
+	fsckObjects = true
+[receive]
+	fsckObjects = true
+
+[rebase]
+	autoStash = false
+	autoSquash = true
+[merge]
+	conflictStyle = zdiff3
+[rerere]
+	enabled = true
+
+[diff]
+	algorithm = histogram
+	colorMoved = default
+	renames = copies
+[branch]
+	sort = -committerdate
+[tag]
+	sort = version:refname
+[column]
+	ui = auto
+[commit]
+	verbose = true
+[status]
+	showStash = true
+[maintenance]
+	strategy = incremental

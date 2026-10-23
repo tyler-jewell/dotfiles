@@ -1,0 +1,36 @@
+# Global ignore (core.excludesFile). Keep this list to things that are never
+# project content on any machine. Repo .gitignore files take precedence.
+
+# macOS / OS cruft
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+
+# Secrets: plaintext env files never belong in a repo. Reference secrets
+# instead (e.g. an `op.refs` file of op:// links used with `op run`).
+.env
+.env.*
+!.env.example
+!.env.sample
+!*.example
+!*.sample
+!op.refs
+
+# Node
+node_modules/
+*.log
+npm-debug.log*
+
+# Editors (.vscode/ is deliberately NOT ignored: repos share settings there)
+.idea/
+*.swp
+*.swo
+*~
+
+# AI agent local state
+.claude/worktrees/
+.claude/settings.local.json
+**/.claude/settings.local.json
+CLAUDE.local.md

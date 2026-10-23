@@ -1,0 +1,16 @@
+# Entry point, symlinked to ~/.config/git/config by bootstrap.sh.
+# It only assembles layers; every include is optional (a missing file is
+# silently ignored by git), so each layer can be installed or skipped alone:
+#
+#   presets            sensible git defaults          (bootstrap --no-config skips)
+#   hooks.inc          wires core.hooksPath           (bootstrap --no-hooks skips)
+#   ../dotfiles/config YOUR overlay, included LAST so it overrides everything
+#                      above: profile, hook switches, exempt origins, identity,
+#                      signing. Relative paths resolve from the directory of
+#                      this link, so it follows XDG_CONFIG_HOME.
+#
+# Reference: docs/GIT-CONFIG.md
+[include]
+	path = presets
+	path = hooks.inc
+	path = ../dotfiles/config

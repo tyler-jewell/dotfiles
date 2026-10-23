@@ -1,0 +1,45 @@
+# Your personal dotfiles overlay. NOT tracked anywhere; created once by
+# `bootstrap.sh` and never overwritten. It is included LAST by
+# ~/.config/git/config, so anything set here beats the shipped defaults.
+# Uncomment what you want. Reference: docs/GIT-CONFIG.md
+
+# --- Which checks run -------------------------------------------------------
+# minimal  : secret scan only
+# standard : + Conventional Commits check, background fetch-only sync trigger
+# strict   : + branch-name policy, protection of main/master
+# [dotfiles]
+#	profile = standard
+
+# --- Per-feature overrides (win over the profile; also work per repo with
+#     `git config --local hooks.<name> false`) ---------------------------------
+# [hooks]
+#	secretScan = true
+#	conventionalCommits = true
+#	branchName = false
+#	branchNamePattern = ^(feat|fix|docs|chore)/[a-z0-9-]+$
+#	protectMain = false
+#	sync = true
+#	issueFooter = false
+
+# --- Repos that follow their own conventions: no global checks, no sync -----
+# Case-insensitive globs matched against every remote URL. Repeat the line to
+# add more. Their own repo hooks keep running.
+# [hooks]
+#	exemptOrigins = *github.com/acme-corp/*
+
+# --- Identity and signing (bootstrap --name/--email/--enable-signing write
+#     these for you) -----------------------------------------------------------
+# [user]
+#	name = Your Name
+#	email = you@example.com
+# [commit]
+#	gpgsign = true
+# [gpg]
+#	format = ssh
+# [user]
+#	signingkey = ~/.ssh/id_ed25519.pub
+
+# --- Optional: GitHub CLI as credential helper --------------------------------
+# [credential "https://github.com"]
+#	helper =
+#	helper = !gh auth git-credential

@@ -1,0 +1,20 @@
+# Global attributes (core.attributesFile). Conservative: line endings for
+# scripts, readable hunk headers, binary hints.
+*.sh      text eol=lf
+*.bash    text eol=lf
+*.zsh     text eol=lf
+*.plist   text
+*.md      diff=markdown
+*.css     diff=css
+*.html    diff=html
+*.py      diff=python
+*.rs      diff=rust
+*.go      diff=golang
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
+*.woff    binary
+*.woff2   binary
