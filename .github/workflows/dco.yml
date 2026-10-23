@@ -1,0 +1,12 @@
+# Every non-bot commit in a PR needs "Signed-off-by:". Calls the shared reusable workflow.
+name: dco
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  dco:
+    uses: tyler-jewell/shared-config/.github/workflows/dco.yml@v1
+    permissions:
+      contents: read

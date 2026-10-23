@@ -1,0 +1,141 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  contents: read
+env:
+  # Pinned tool versions; sha256 values are the upstream release digests.
+  SHELLCHECK_VERSION: "0.11.0"
+  SHELLCHECK_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+  SHFMT_VERSION: "3.14.1"
+  SHFMT_SHA256: 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Tool versions
+        run: git --version && bash --version | head -n 1 && (jq --version || true)
+      - name: Tests
+        run: bash tests/run.sh
+      - name: Tests under the oldest bash on macOS (3.2)
+        if: runner.os == 'macOS'
+        run: /bin/bash tests/run.sh
+
+  test-git:
+    name: test (git in ${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "ubuntu:24.04"]
+    steps:
+      - name: Install git, jq and bash
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git jq ca-certificates procps >/dev/null
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Make the workspace owned by the container user
+        run: chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+      - name: Tool versions
+        run: git --version && bash --version | head -n 1
+      - name: Tests
+        run: bash tests/run.sh
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install shellcheck (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          tgz="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tgz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/$tgz"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/$tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tgz" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          files=$(git ls-files | while read -r f; do
+            [ -f "$f" ] && [ ! -L "$f" ] && head -n 1 "$f" | grep -q '^#!.*bash' && echo "$f"
+          done)
+          # shellcheck disable=SC2086
+          shellcheck -x $files
+
+  shfmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install shfmt (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          bin="shfmt_v${SHFMT_VERSION}_linux_amd64"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$bin" \
+            "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/$bin"
+          echo "${SHFMT_SHA256}  $RUNNER_TEMP/$bin" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/$bin" /usr/local/bin/shfmt
+          shfmt --version
+      - name: shfmt -d
+        run: |
+          set -euo pipefail
+          files=$(git ls-files | while read -r f; do
+            [ -f "$f" ] && [ ! -L "$f" ] && head -n 1 "$f" | grep -q '^#!.*bash' && echo "$f"
+          done)
+          # shellcheck disable=SC2086
+          shfmt -d $files
+
+  validate:
+    name: validate (json, yaml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: JSON and YAML parse
+        run: |
+          set -euo pipefail
+          for f in $(git ls-files '*.json'); do jq -e . "$f" >/dev/null; done
+          for f in $(git ls-files '*.yml' '*.yaml'); do ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$f"; done
+
+  # Single required status check (the shared-config convention): the context is
+  # exactly `ci`.
+  ci:
+    if: always()
+    needs: [test, test-git, shellcheck, shfmt, validate]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do [ "$r" = success ] || [ "$r" = skipped ] || { echo "failed: $RESULTS"; exit 1; }; done

@@ -1,0 +1,42 @@
+name: Bug report
+description: Something is broken
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include the exact command and its output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "Output of ./bootstrap.sh --version"
+  - type: input
+    id: env
+    attributes:
+      label: OS, bash and git versions
+      description: "For example: macOS 15, bash 3.2, git 2.47"
+  - type: textarea
+    id: check
+    attributes:
+      label: Doctor output
+      description: "./bootstrap.sh --check --json (redact anything private)"
+      render: json
+  - type: markdown
+    attributes:
+      value: Do not paste secrets or tokens. Redact them.

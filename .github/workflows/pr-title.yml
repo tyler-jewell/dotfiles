@@ -1,0 +1,20 @@
+# PR title must be a Conventional Commit. Calls the shared reusable workflow;
+# `pr-title` is a plain gate job so the required-status-check context is exactly `pr-title`.
+name: pr-title
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  title-lint:
+    uses: tyler-jewell/shared-config/.github/workflows/pr-title.yml@v1
+  pr-title:
+    if: always()
+    needs: [title-lint]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          R: ${{ needs.title-lint.result }}
+        run: '[ "$R" = success ] || [ "$R" = skipped ]'

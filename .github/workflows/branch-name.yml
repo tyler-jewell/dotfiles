@@ -1,0 +1,10 @@
+# Branch names must be type/issue-slug. Calls the shared reusable workflow.
+name: branch-name
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  branch-name:
+    uses: tyler-jewell/shared-config/.github/workflows/branch-name.yml@v1

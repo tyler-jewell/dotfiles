@@ -1,0 +1,58 @@
+# release-please keeps a release PR open; merging it tags vX.Y.Z and creates the
+# GitHub release. The assets job then builds the tarball with git archive,
+# writes SHA256SUMS, attests build provenance and uploads both files.
+name: release
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+    steps:
+      # googleapis/release-please-action v5.0.0
+      - id: rp
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  assets:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # upload release assets
+      id-token: write # sign the attestation
+      attestations: write
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - name: Build tarball and SHA256SUMS
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: scripts/make-release.sh "$VERSION" dist
+      # actions/attest-build-provenance v4.2.2
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-path: |
+            dist/dotfiles-*.tar.gz
+            dist/SHA256SUMS
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: gh release upload "$TAG" "dist/dotfiles-${VERSION}.tar.gz" dist/SHA256SUMS --clobber
