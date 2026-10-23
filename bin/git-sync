@@ -1,0 +1,598 @@
+#!/usr/bin/env bash
+# git-sync - keep local branches in step with their remotes, without ever
+# merging, rebasing, resetting, stashing, forcing or deleting (unless asked).
+# Installed on PATH as `git-sync`, so it is also available as `git sync`.
+# Compatible with bash 3.2 (macOS) and newer.
+SELF=$(cd -P "$(dirname "$0")" && pwd)/$(basename "$0")
+if [ -L "$0" ]; then
+  _t=$0
+  while [ -L "$_t" ]; do
+    _d=$(cd -P "$(dirname "$_t")" && pwd)
+    _t=$(readlink "$_t")
+    case $_t in /*) ;; *) _t="$_d/$_t" ;; esac
+  done
+  SELF=$(cd -P "$(dirname "$_t")" && pwd)/$(basename "$_t")
+fi
+ROOT=$(cd -P "$(dirname "$SELF")/.." && pwd)
+# shellcheck source=../lib/common.sh
+. "$ROOT/lib/common.sh" || {
+  echo "git-sync: cannot load $ROOT/lib/common.sh" >&2
+  exit 1
+}
+VERSION=$(dot_version "$ROOT")
+
+# shellcheck disable=SC2034 # exit-code table; not every code is used
+EX_OK=0 EX_ERR=1 EX_ATTN=2 EX_NET=3 EX_USAGE=64
+
+usage_text() {
+  cat <<'EOF'
+git-sync - fast-forward local branches to their upstreams, safely
+
+USAGE
+  git sync [options]              sync the repository in the current directory
+  git sync --all [options]        sync every repo listed in the manifest (sync=yes)
+  git sync --root DIR [...]       sync every repo directly under DIR (repeatable)
+  git sync --repo PATH [...]      sync specific repositories (repeatable)
+
+OPTIONS
+  --all               every manifest entry with sync=yes that exists locally
+  --root DIR          every git repo directly under DIR; repeatable (manifest
+                      entries with sync=no are still skipped)
+  --repo PATH         repository to sync; repeatable
+  --json              print one JSON document on stdout (schema git-sync/v1)
+  --dry-run           show what would change; change nothing (fetch still runs
+                      unless --no-fetch)
+  --quiet, -q         no human output and no stderr progress; exit code only
+  --no-fetch          do not touch the network; use existing remote refs
+  --prune-merged      delete `gone` branches that are fully merged into
+                      origin/<default>; a git bundle backup is written first
+  --prune-squashed    like --prune-merged but also accepts squash-merged
+                      branches (patch-equivalence check); implies --prune-merged
+  --timeout SECONDS   per-repo network timeout (default 60)
+  --manifest FILE     repo manifest (default: ${XDG_CONFIG_HOME:-~/.config}/dotfiles/repos.txt)
+  --hook              internal: called by git hooks; throttled to once per 5
+                      minutes per repo, silent, never fails, does not update
+                      the checked-out branch
+  --help [--json]     this text, or machine-readable description
+  --version
+
+BRANCH STATES
+  up-to-date | fast-forwarded | behind-skipped-dirty | behind-skipped-worktree
+  ahead | diverged | gone | no-upstream | pruned
+REPO STATUS
+  ok | attention | exempt | disabled | locked | error
+
+EXIT CODES
+  0   everything synced or nothing to do
+  2   attention needed (diverged, or behind but dirty / in another worktree)
+  3   fetch or network error (takes precedence over 2)
+  1   unexpected internal error
+  64  usage error
+
+ENVIRONMENT
+  GIT_SYNC_LOG          log file (default ~/Library/Logs/git-sync.log on macOS,
+                        $XDG_STATE_HOME/git-sync/git-sync.log elsewhere)
+  GIT_SYNC_BACKUP_DIR   bundle backups (default $XDG_STATE_HOME/git-sync/backups)
+  GIT_SYNC_DISABLE=1    make --hook runs a no-op
+  CI=1                  accepted; git-sync never prompts anyway
+  Repos with a remote matching hooks.exemptOrigins (none by default) or
+  hooks.exempt=true are skipped and reported as `exempt`.
+  The only network access is `git fetch` against the repo's own remotes.
+EOF
+}
+
+usage_json() {
+  cat <<EOF
+{"name":"git-sync","version":"$VERSION","schema":"git-sync/v1",
+ "options":["--all","--root","--repo","--json","--dry-run","--quiet","--no-fetch","--prune-merged","--prune-squashed","--timeout","--manifest","--hook","--help","--version"],
+ "exit_codes":{"0":"synced or nothing to do","1":"internal error","2":"attention needed","3":"fetch/network error","64":"usage error"},
+ "branch_states":["up-to-date","fast-forwarded","behind-skipped-dirty","behind-skipped-worktree","ahead","diverged","gone","no-upstream","pruned"],
+ "repo_status":["ok","attention","exempt","disabled","locked","error"],
+ "interactive":false}
+EOF
+}
+
+# ---------------------------------------------------------------- arguments
+ALL=0 ROOTS=() JSON=0 DRY=0 QUIET=0 NOFETCH=0 PRUNE=0 SQUASH=0 HOOKMODE=0 HELP=0 TIMEOUT=60
+MANIFEST=$(dot_default_manifest)
+REPOS=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --all) ALL=1 ;;
+    --repo)
+      [ $# -ge 2 ] || {
+        echo "git-sync: --repo needs a path" >&2
+        exit $EX_USAGE
+      }
+      REPOS+=("$2")
+      shift
+      ;;
+    --root)
+      [ $# -ge 2 ] || {
+        echo "git-sync: --root needs a directory" >&2
+        exit $EX_USAGE
+      }
+      ROOTS+=("$2")
+      shift
+      ;;
+    --repo=*) REPOS+=("${1#*=}") ;;
+    --json) JSON=1 ;;
+    --dry-run | -n) DRY=1 ;;
+    --quiet | -q) QUIET=1 ;;
+    --no-fetch) NOFETCH=1 ;;
+    --prune-merged) PRUNE=1 ;;
+    --prune-squashed)
+      PRUNE=1
+      SQUASH=1
+      ;;
+    --timeout)
+      [ $# -ge 2 ] || {
+        echo "git-sync: --timeout needs seconds" >&2
+        exit $EX_USAGE
+      }
+      TIMEOUT=$2
+      shift
+      ;;
+    --manifest)
+      [ $# -ge 2 ] || {
+        echo "git-sync: --manifest needs a file" >&2
+        exit $EX_USAGE
+      }
+      MANIFEST=$2
+      shift
+      ;;
+    --hook) HOOKMODE=1 ;;
+    -h | --help) HELP=1 ;;
+    --version)
+      echo "git-sync $VERSION"
+      exit 0
+      ;;
+    *)
+      echo "git-sync: unknown argument: $1 (try --help)" >&2
+      exit $EX_USAGE
+      ;;
+  esac
+  shift
+done
+if [ $HELP = 1 ]; then
+  if [ $JSON = 1 ]; then usage_json; else usage_text; fi
+  exit 0
+fi
+case $TIMEOUT in '' | *[!0-9]*)
+  echo "git-sync: --timeout must be a positive integer" >&2
+  exit $EX_USAGE
+  ;;
+esac
+[ $HOOKMODE = 1 ] && {
+  QUIET=1
+  JSON=0
+  PRUNE=0
+  SQUASH=0
+  ALL=0
+  ROOTS=()
+}
+if [ $HOOKMODE = 1 ] && [ "${GIT_SYNC_DISABLE:-}" = 1 ]; then exit 0; fi
+
+# ---------------------------------------------------------------- environment
+export GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 DOTFILES_GIT_SYNC_RUNNING=1
+export GIT_MERGE_AUTOEDIT=no
+if [ -z "${GIT_SSH_COMMAND:-}" ] && [ -z "${GIT_SSH:-}" ] && [ -z "$(git config --get core.sshCommand 2>/dev/null)" ]; then
+  export GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=15'
+fi
+if [ -z "${GIT_SYNC_LOG:-}" ]; then
+  if [ "$(uname)" = Darwin ]; then
+    GIT_SYNC_LOG=$HOME/Library/Logs/git-sync.log
+  else GIT_SYNC_LOG=${XDG_STATE_HOME:-$HOME/.local/state}/git-sync/git-sync.log; fi
+fi
+BACKUP_DIR=${GIT_SYNC_BACKUP_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/git-sync/backups}
+
+log() { # log LEVEL MESSAGE... -> file (always, unless hook-silent) and stderr (unless quiet)
+  local lvl=$1 line
+  shift
+  line="$(date '+%Y-%m-%dT%H:%M:%S%z') [$lvl] $*"
+  if mkdir -p "$(dirname "$GIT_SYNC_LOG")" 2>/dev/null; then
+    if [ -f "$GIT_SYNC_LOG" ] && [ "$(wc -c <"$GIT_SYNC_LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+      mv -f "$GIT_SYNC_LOG" "$GIT_SYNC_LOG.1" 2>/dev/null
+    fi
+    printf '%s\n' "$line" >>"$GIT_SYNC_LOG" 2>/dev/null
+  fi
+  [ $QUIET = 1 ] || printf '%s\n' "$line" >&2
+}
+
+# ---------------------------------------------------------------- results
+JSTR=dot_json_str
+REPOS_JSON=""  # comma separated repo objects
+ERRORS_JSON="" # comma separated top-level errors
+N_REPOS=0 N_BRANCHES=0 N_ATTN=0 N_FF=0 N_PRUNED=0 N_EXEMPT=0 N_FETCHERR=0
+HUMAN=""
+
+add_error() { # repo message
+  local e
+  e="{\"repo\":$($JSTR "$1"),\"message\":$($JSTR "$2")}"
+  ERRORS_JSON="${ERRORS_JSON:+$ERRORS_JSON,}$e"
+}
+
+human() { HUMAN="$HUMAN$*
+"; }
+
+# ---------------------------------------------------------------- per repo
+g() { git -C "$REPO" "$@"; }
+
+default_branch() { # prints e.g. "main" using origin/HEAD, falling back to main/master
+  local ref
+  ref=$(g symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
+  if [ -n "$ref" ]; then
+    printf '%s\n' "${ref#origin/}"
+    return 0
+  fi
+  for ref in main master; do
+    g show-ref --verify --quiet "refs/remotes/origin/$ref" && {
+      printf '%s\n' "$ref"
+      return 0
+    }
+  done
+  return 1
+}
+
+op_in_progress() { # prints reason when a merge/rebase/bisect/etc is running
+  local gd r
+  gd=$(g rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  for r in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+    [ -e "$gd/$r" ] && {
+      printf '%s\n' "$r"
+      return 0
+    }
+  done
+  return 1
+}
+
+manifest_sync_flag() { # manifest_sync_flag ABS_PATH -> prints yes|no|"" (unknown)
+  [ -f "$MANIFEST" ] || return 0
+  local owner dest _role sync rest p
+  while read -r owner dest _role sync rest; do
+    case $owner in '' | \#*) continue ;; esac
+    p=${dest/#\~/$HOME}
+    if [ "$p" = "$1" ]; then
+      printf '%s\n' "$sync"
+      return 0
+    fi
+  done <"$MANIFEST"
+}
+
+# shellcheck disable=SC2100 # false positive: state names contain dashes
+sync_repo() {
+  REPO=$1
+  local name status="ok" fetch_ok=true fetch_skipped=false fetch_err="" def="" common=""
+  local repo_errors="" lockdir="" cur_ref toplevel dirty="" opip="" rc out
+  local RECORDS="" PRUNE_NAMES=""
+  name=$(basename "$REPO")
+  N_REPOS=$((N_REPOS + 1))
+
+  if ! g rev-parse --git-dir >/dev/null 2>&1; then
+    status=error
+    repo_errors="not a git repository"
+    add_error "$REPO" "not a git repository"
+    human "  error: not a git repository"
+    finish_repo
+    return
+  fi
+  toplevel=$(g rev-parse --show-toplevel 2>/dev/null)
+  [ -n "$toplevel" ] && REPO=$toplevel && name=$(basename "$REPO")
+
+  if dot_is_exempt "$REPO"; then
+    status=exempt
+    N_EXEMPT=$((N_EXEMPT + 1))
+    human "  exempt (hooks.exemptOrigins) - skipped"
+    finish_repo
+    return
+  fi
+  if { [ $ALL = 1 ] || [ ${#ROOTS[@]} -gt 0 ]; } && [ "$(manifest_sync_flag "$REPO")" = no ]; then
+    status=disabled
+    human "  sync=no in manifest - skipped"
+    finish_repo
+    return
+  fi
+
+  common=$(cd "$REPO" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+  if [ $HOOKMODE = 1 ] && [ -e "$common/git-sync.last" ] &&
+    [ -n "$(find "$common/git-sync.last" -mmin -5 2>/dev/null)" ]; then
+    exit 0
+  fi
+  # per-repo lock (mkdir is atomic); stale locks (dead pid) are reclaimed
+  lockdir="$common/git-sync.lock"
+  if ! mkdir "$lockdir" 2>/dev/null; then
+    out=$(cat "$lockdir/pid" 2>/dev/null)
+    if [ -n "$out" ] && kill -0 "$out" 2>/dev/null; then
+      status=locked
+      human "  another git-sync is running - skipped"
+      [ $HOOKMODE = 1 ] && exit 0
+      lockdir=""
+      finish_repo
+      return
+    fi
+    rm -rf "$lockdir"
+    mkdir "$lockdir" 2>/dev/null || {
+      status=locked
+      lockdir=""
+      finish_repo
+      return
+    }
+  fi
+  echo $$ >"$lockdir/pid"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$lockdir'" EXIT
+
+  # ---- fetch
+  if [ $NOFETCH = 1 ] || [ -z "$(g remote)" ]; then
+    fetch_skipped=true
+  else
+    log INFO "fetch --all --prune in $REPO"
+    fetch_err=$(dot_timeout "$TIMEOUT" git -C "$REPO" fetch --all --prune --no-tags --quiet 2>&1 </dev/null)
+    rc=$?
+    if [ $rc -ne 0 ]; then
+      fetch_ok=false
+      case $rc in 124 | 142) fetch_err="timed out after ${TIMEOUT}s: $fetch_err" ;; esac
+      fetch_err=$(printf '%s' "$fetch_err" | head -c 400)
+      N_FETCHERR=$((N_FETCHERR + 1))
+      add_error "$REPO" "fetch failed: $fetch_err"
+      log ERROR "fetch failed in $REPO: $fetch_err"
+      human "  fetch FAILED: $fetch_err"
+    fi
+  fi
+
+  # ---- evaluate branches
+  def=$(default_branch) || def=""
+  cur_ref=$(g symbolic-ref -q HEAD 2>/dev/null)
+  opip=$(op_in_progress)
+  [ -n "$(g status --porcelain --untracked-files=no 2>/dev/null)" ] && dirty=1
+  local wt_other
+  wt_other=$(g worktree list --porcelain 2>/dev/null | awk -v top="$toplevel" '
+    /^worktree / { wt = substr($0, 10) }
+    /^branch /   { if (wt != top) print substr($0, 8) }')
+
+  local bname upstream track sha upref fullref ahead behind state reason applied checked_out elsewhere counts lines SEP
+  SEP=$(printf '\037')
+  lines=$(g for-each-ref --format="%(refname:short)%1f%(upstream:short)%1f%(upstream:track)%1f%(objectname)%1f%(upstream)%1f%(refname)" refs/heads)
+  while IFS="$SEP" read -r bname upstream track sha upref fullref; do
+    [ -z "$bname" ] && continue
+    ahead=0 behind=0 state="" reason="" applied=false checked_out=false elsewhere=false
+    [ "$fullref" = "$cur_ref" ] && checked_out=true
+    case "
+$wt_other
+" in *"
+$fullref
+"*) elsewhere=true ;; esac
+
+    if [ -z "$upstream" ]; then
+      state=no-upstream
+    elif [ "$track" = "[gone]" ]; then
+      state=gone
+      reason="upstream $upstream no longer exists"
+    else
+      counts=$(g rev-list --left-right --count "$fullref...$upref" 2>/dev/null)
+      ahead=${counts%%[[:space:]]*}
+      behind=${counts##*[[:space:]]}
+      ahead=${ahead:-0} behind=${behind:-0}
+      if [ "$ahead" -eq 0 ] && [ "$behind" -eq 0 ]; then
+        state=up-to-date
+      elif [ "$behind" -eq 0 ]; then
+        state=ahead
+      elif [ "$ahead" -gt 0 ]; then
+        state=diverged
+      elif [ $checked_out = true ]; then
+        if [ -n "$dirty" ]; then
+          state=behind-skipped-dirty
+          reason="working tree has uncommitted changes"
+        elif [ -n "$opip" ]; then
+          state=behind-skipped-dirty
+          reason="$opip in progress"
+        elif [ $HOOKMODE = 1 ] && [ "$(g config --type=bool --get sync.hookUpdateCurrent 2>/dev/null)" != true ]; then
+          state=behind-skipped-dirty
+          reason="checked-out branch is not updated from hooks; run: git sync"
+        elif [ $DRY = 1 ]; then
+          state=fast-forwarded
+        elif out=$(g merge --ff-only --quiet "$upref" 2>&1 </dev/null); then
+          state=fast-forwarded
+          applied=true
+        else
+          state=behind-skipped-dirty
+          reason=$(printf '%s' "$out" | head -n 1 | head -c 200)
+        fi
+      elif [ $elsewhere = true ]; then
+        state=behind-skipped-worktree
+        reason="checked out in another worktree"
+      elif [ $DRY = 1 ]; then
+        state=fast-forwarded
+      elif out=$(g update-ref -m "git-sync: fast-forward to $upstream" "$fullref" "$upref" "$sha" 2>&1); then
+        state=fast-forwarded
+        applied=true
+      else
+        state=behind-skipped-dirty
+        reason=$(printf '%s' "$out" | head -n 1 | head -c 200)
+      fi
+      [ "$state" = fast-forwarded ] && N_FF=$((N_FF + 1))
+    fi
+
+    if [ "$state" = gone ] && [ $PRUNE = 1 ]; then
+      if [ $checked_out = true ] || [ $elsewhere = true ]; then
+        reason="$reason; checked out, not pruned"
+      elif [ "$fetch_ok" != true ] || [ "$fetch_skipped" = true ]; then
+        reason="$reason; no fresh fetch, not pruned"
+      elif [ -z "$def" ]; then
+        reason="$reason; default branch unknown, not pruned"
+      elif g merge-base --is-ancestor "$fullref" "refs/remotes/origin/$def" 2>/dev/null; then
+        PRUNE_NAMES="$PRUNE_NAMES$bname
+"
+      elif [ $SQUASH = 1 ] && is_squash_merged "$fullref" "refs/remotes/origin/$def"; then
+        PRUNE_NAMES="$PRUNE_NAMES$bname
+"
+      else
+        reason="$reason; not merged into origin/$def, kept"
+      fi
+    fi
+    RECORDS="$RECORDS$bname$SEP$state$SEP$upstream$SEP$ahead$SEP$behind$SEP$checked_out$SEP$applied$SEP$reason$SEP$SEP$sha
+"
+  done <<EOF
+$lines
+EOF
+
+  [ -n "$PRUNE_NAMES" ] && prune_branches
+  render_records
+  finish_repo
+}
+
+is_squash_merged() { # is_squash_merged BRANCH_REF TARGET_REF
+  local base tree fake
+  base=$(g merge-base "$2" "$1" 2>/dev/null) || return 1
+  tree=$(g rev-parse "$1^{tree}" 2>/dev/null) || return 1
+  fake=$(g commit-tree "$tree" -p "$base" -m _ 2>/dev/null) || return 1
+  [ "$(g cherry "$2" "$fake" 2>/dev/null | cut -c1)" = "-" ]
+}
+
+# prune_branches: operates on PRUNE_NAMES / RECORDS of sync_repo (dynamic scope).
+# Backup first (one verified bundle of all tips), delete only afterwards.
+prune_branches() {
+  local bundle refs=() b tip newrec="" line bn rest SEP deleted="" stamp
+  SEP=$(printf '\037')
+  stamp=$(date +%Y%m%dT%H%M%S)
+  bundle="$BACKUP_DIR/git-sync-pruned-$name-$stamp.bundle"
+  while IFS= read -r b; do [ -n "$b" ] && refs+=("refs/heads/$b"); done <<EOF
+$PRUNE_NAMES
+EOF
+  if [ $DRY != 1 ]; then
+    mkdir -p "$BACKUP_DIR" 2>/dev/null
+    if ! { g bundle create "$bundle" "${refs[@]}" >/dev/null 2>&1 && g bundle verify "$bundle" >/dev/null 2>&1; }; then
+      log ERROR "bundle backup failed for $REPO; nothing pruned"
+      add_error "$REPO" "bundle backup failed; nothing pruned"
+      human "  prune aborted: bundle backup failed"
+      return
+    fi
+  fi
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    if [ $DRY != 1 ]; then
+      tip=$(g rev-parse "refs/heads/$b" 2>/dev/null)
+      g update-ref -d "refs/heads/$b" "$tip" 2>/dev/null || continue
+      g config --remove-section "branch.$b" >/dev/null 2>&1
+      log INFO "pruned $b ($tip) in $REPO; backup $bundle"
+    fi
+    N_PRUNED=$((N_PRUNED + 1))
+    deleted="$deleted$b
+"
+  done <<EOF
+$PRUNE_NAMES
+EOF
+  # rewrite records: state -> pruned, backup path filled in
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    bn=${line%%"$SEP"*}
+    case "
+$deleted" in
+      *"
+$bn
+"*)
+        # fields: name state upstream ahead behind checked_out applied reason backup sha
+        newrec="$newrec$(printf '%s' "$line" | awk -F "$SEP" -v OFS="$SEP" -v bk="$bundle" -v ap="$([ $DRY = 1 ] && echo false || echo true)" '{ $2 = "pruned"; $7 = ap; $9 = bk; print }')
+"
+        ;;
+      *) newrec="$newrec$line
+" ;;
+    esac
+  done <<EOF
+$RECORDS
+EOF
+  RECORDS=$newrec
+}
+
+# render_records: RECORDS -> JSON branch list (BRANCHES_JSON) + human lines.
+render_records() {
+  local line SEP bname state upstream ahead behind co applied reason backup sha
+  SEP=$(printf '\037')
+  BRANCHES_JSON=""
+  while IFS="$SEP" read -r bname state upstream ahead behind co applied reason backup sha; do
+    [ -n "$bname" ] || continue
+    N_BRANCHES=$((N_BRANCHES + 1))
+    case $state in
+      diverged | behind-skipped-dirty | behind-skipped-worktree)
+        N_ATTN=$((N_ATTN + 1))
+        [ "$status" = ok ] && status=attention
+        ;;
+    esac
+    BRANCHES_JSON="${BRANCHES_JSON:+$BRANCHES_JSON,}{\"name\":$($JSTR "$bname"),\"state\":\"$state\",\"upstream\":$([ -n "$upstream" ] && $JSTR "$upstream" || echo null),\"ahead\":$ahead,\"behind\":$behind,\"checked_out\":$co,\"applied\":$applied,\"reason\":$([ -n "$reason" ] && $JSTR "$reason" || echo null),\"backup\":$([ -n "$backup" ] && $JSTR "$backup" || echo null)}"
+    human "  $(printf '%-30s %-24s' "$bname" "$state")${upstream:+ $upstream +$ahead/-$behind}${reason:+  ($reason)}"
+  done <<EOF
+$RECORDS
+EOF
+}
+
+finish_repo() {
+  REPOS_JSON="${REPOS_JSON:+$REPOS_JSON,}{\"path\":$($JSTR "$REPO"),\"name\":$($JSTR "$name"),\"status\":\"$status\",\"exempt\":$([ "$status" = exempt ] && echo true || echo false),\"default_branch\":$([ -n "$def" ] && $JSTR "$def" || echo null),\"fetch\":{\"ok\":$fetch_ok,\"skipped\":$fetch_skipped,\"error\":$([ -n "$fetch_err" ] && $JSTR "$fetch_err" || echo null)},\"branches\":[${BRANCHES_JSON:-}],\"errors\":[$([ -n "$repo_errors" ] && $JSTR "$repo_errors")]}"
+  BRANCHES_JSON=""
+  if [ -n "$common" ] && { [ "$status" = ok ] || [ "$status" = attention ]; } && [ $HOOKMODE = 1 ]; then
+    : >"$common/git-sync.last" 2>/dev/null
+  fi
+  [ -n "$lockdir" ] && rm -rf "$lockdir" 2>/dev/null
+  trap - EXIT
+}
+
+# ---------------------------------------------------------------- main
+TARGETS=()
+if [ ${#REPOS[@]} -gt 0 ]; then
+  for r in "${REPOS[@]}"; do TARGETS+=("$r"); done
+elif [ $ALL = 1 ] || [ ${#ROOTS[@]} -gt 0 ]; then
+  if [ $ALL = 1 ]; then
+    if [ -f "$MANIFEST" ]; then
+      while read -r _o dest _r syn _x; do
+        case $_o in '' | \#*) continue ;; esac
+        [ "$syn" = no ] && continue
+        dest=${dest/#\~/$HOME}
+        [ -e "$dest/.git" ] && TARGETS+=("$dest")
+      done <"$MANIFEST"
+    elif [ ${#ROOTS[@]} -eq 0 ]; then
+      echo "git-sync: --all needs a manifest ($MANIFEST not found; see manifest/repos.example.txt) or --root DIR" >&2
+      exit $EX_USAGE
+    fi
+  fi
+  for r in ${ROOTS[@]+"${ROOTS[@]}"}; do
+    r=${r/#\~/$HOME}
+    [ -d "$r" ] || {
+      echo "git-sync: --root: not a directory: $r" >&2
+      exit $EX_USAGE
+    }
+    for d in "$r"/*/; do
+      d=${d%/}
+      [ -e "$d/.git" ] && TARGETS+=("$d")
+    done
+  done
+else
+  if ! top=$(git rev-parse --show-toplevel 2>/dev/null); then
+    [ $HOOKMODE = 1 ] && exit 0
+    echo "git-sync: not inside a git repository (use --repo PATH or --all)" >&2
+    exit $EX_USAGE
+  fi
+  TARGETS+=("$top")
+fi
+[ ${#TARGETS[@]} -gt 0 ] || { [ $JSON = 1 ] || [ $QUIET = 1 ] || echo "git-sync: no repositories found"; }
+
+for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
+  HUMAN=""
+  if [ -d "$t" ]; then t=$(cd "$t" && pwd); fi
+  human "$(basename "$t")"
+  sync_repo "$t"
+  [ $QUIET = 1 ] || [ $JSON = 1 ] || printf '%s' "$HUMAN"
+done
+
+rc=$EX_OK
+[ $N_ATTN -gt 0 ] && rc=$EX_ATTN
+[ $N_FETCHERR -gt 0 ] && rc=$EX_NET
+[ $HOOKMODE = 1 ] && rc=0
+
+if [ $JSON = 1 ]; then
+  printf '{"schema":"git-sync/v1","version":"%s","dry_run":%s,"exit_code":%s,"repos":[%s],"errors":[%s],"summary":{"repos":%s,"branches":%s,"attention":%s,"fast_forwarded":%s,"pruned":%s,"exempt":%s,"fetch_errors":%s}}\n' \
+    "$VERSION" "$([ $DRY = 1 ] && echo true || echo false)" "$rc" "$REPOS_JSON" "$ERRORS_JSON" \
+    "$N_REPOS" "$N_BRANCHES" "$N_ATTN" "$N_FF" "$N_PRUNED" "$N_EXEMPT" "$N_FETCHERR"
+elif [ $QUIET != 1 ]; then
+  printf 'git-sync: %s repo(s), %s fast-forwarded, %s need attention, %s pruned, %s exempt\n' \
+    "$N_REPOS" "$N_FF" "$N_ATTN" "$N_PRUNED" "$N_EXEMPT"
+fi
+exit $rc

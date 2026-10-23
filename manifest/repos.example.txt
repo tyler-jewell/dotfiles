@@ -1,0 +1,15 @@
+# Example repo manifest. Copy to ${XDG_CONFIG_HOME:-~/.config}/dotfiles/repos.txt
+# (or pass --manifest FILE). Used by `git sync --all` and
+# `bootstrap.sh --clone-repos`. This file is only an example; nothing reads it.
+#
+# owner/repo              dest                       role         sync   [exempt]
+# Columns are whitespace separated. `#` starts a comment. dest may start with ~.
+#   role  : free text label (infra, development, config, ...)
+#   sync  : yes|no   - whether `git sync --all` touches the repo
+#   exempt: optional - informational; the real exemption is hooks.exemptOrigins
+acme-corp/widgets         ~/code/widgets             development  yes
+acme-corp/infrastructure  ~/code/infrastructure      infra        yes
+example-user/notes        ~/code/notes               config       yes
+# A repo that follows its own conventions: never synced by --all. To also skip
+# the commit/push hooks, add `*github.com/acme-corp/legacy*` to hooks.exemptOrigins.
+acme-corp/legacy          ~/code/legacy              development  no     exempt
