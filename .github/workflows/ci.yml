@@ -6,6 +6,9 @@ on:
     types: [opened, edited, synchronize, reopened]
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   # Pinned tool versions; sha256 values are the upstream release digests.
   SHELLCHECK_VERSION: "0.11.0"
@@ -13,13 +16,23 @@ env:
   SHFMT_VERSION: "3.14.1"
   SHFMT_SHA256: 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  # Runner picker: prefers the self-hosted Mac Studio (when online, idle and the event is a trusted
+  # same-repo one), else the fallback label. Fork PRs never reach the Studio. See shared-config docs/RUNNERS.md.
+  # Fallback is macos-latest (free on public repos) so the macOS leg always runs on macOS.
+  pick:
+    uses: tyler-jewell/shared-config/.github/workflows/select-runner.yml@v1
+    permissions:
+      contents: read
+    with:
+      fallback: macos-latest
+    secrets:
+      runner-status-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
+
+  # macOS leg: Studio (arm64) when available, else hosted macos-latest.
+  test-macos:
+    name: test (macos)
+    needs: pick
+    runs-on: ${{ fromJSON(needs.pick.outputs.runs-on) }}
     timeout-minutes: 15
     steps:
       # actions/checkout v7.0.1
@@ -31,8 +44,22 @@ jobs:
       - name: Tests
         run: bash tests/run.sh
       - name: Tests under the oldest bash on macOS (3.2)
-        if: runner.os == 'macOS'
         run: /bin/bash tests/run.sh
+
+  # Linux leg: always on a hosted runner so Linux portability is always proven (never on the Studio).
+  test-linux:
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Tool versions
+        run: git --version && bash --version | head -n 1 && (jq --version || true)
+      - name: Tests
+        run: bash tests/run.sh
 
   test-git:
     name: test (git in ${{ matrix.image }})
@@ -131,7 +158,7 @@ jobs:
   # exactly `ci`.
   ci:
     if: always()
-    needs: [test, test-git, shellcheck, shfmt, validate]
+    needs: [pick, test-macos, test-linux, test-git, shellcheck, shfmt, validate]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
