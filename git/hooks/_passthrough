@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# _passthrough: global hooks replace .git/hooks wholesale, so every hook name we
+# do not implement is symlinked here to keep the repo's own hook working.
+HOOK=$(basename "$0")
+HERE=$(cd -P "$(dirname "$0")" && pwd)
+# shellcheck source=../../lib/common.sh
+. "$HERE/../../lib/common.sh" 2>/dev/null || {
+  h="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/$HOOK"
+  [ -x "$h" ] && exec "$h" "$@"
+  exit 0
+}
+dot_chain "$HOOK" "$@"
+exit 0

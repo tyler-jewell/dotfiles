@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# prepare-commit-msg: optional. With `git config hooks.issueFooter true`, append
+# "Refs: #N" when the branch is named type/N-slug. Then chain to the repo hook.
+HOOK=prepare-commit-msg
+HERE=$(cd -P "$(dirname "$0")" && pwd)
+# shellcheck source=../../lib/common.sh
+. "$HERE/../../lib/common.sh" 2>/dev/null || {
+  h="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/$HOOK"
+  [ -x "$h" ] && exec "$h" "$@"
+  exit 0
+}
+
+msg_file=${1:-} source=${2:-}
+if [ -n "$msg_file" ] && [ -f "$msg_file" ] &&
+  { [ -z "$source" ] || [ "$source" = template ] || [ "$source" = message ]; } &&
+  [ "$(git config --type=bool --get hooks.issueFooter 2>/dev/null)" = true ] &&
+  ! dot_is_exempt; then
+  branch=$(git symbolic-ref -q --short HEAD 2>/dev/null)
+  num=$(printf '%s\n' "$branch" | sed -n -E 's#^[a-z]+/([0-9]+)-.*#\1#p')
+  if [ -n "$num" ] && ! grep -Eq "(^|[^0-9])#$num([^0-9]|\$)" "$msg_file"; then
+    git interpret-trailers --in-place --if-exists doNothing --trailer "Refs: #$num" "$msg_file" 2>/dev/null || true
+  fi
+fi
+dot_chain "$HOOK" "$@"
+exit 0

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# commit-msg (feature hooks.conventionalCommits): enforce Conventional Commits,
+# then chain to the repo's own hook.
+# Bypass: git commit --no-verify   |   Exempt repos (hooks.exemptOrigins): no-op.
+HOOK=commit-msg
+HERE=$(cd -P "$(dirname "$0")" && pwd)
+# shellcheck source=../../lib/common.sh
+. "$HERE/../../lib/common.sh" 2>/dev/null || {
+  h="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/$HOOK"
+  [ -x "$h" ] && exec "$h" "$@"
+  exit 0
+}
+
+msg_file=${1:-}
+if [ -n "$msg_file" ] && [ -f "$msg_file" ] && dot_feature conventionalCommits && ! dot_is_exempt; then
+  # First non-empty, non-comment line is the header.
+  header=$(grep -v '^#' "$msg_file" | grep -v '^[[:space:]]*$' | head -n 1)
+  types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+  re="^($types)(\\([A-Za-z0-9._/,-]+\\))?!?: [^[:space:]].*$"
+  ok=0
+  case $header in
+    "Merge "* | "Revert "* | "fixup! "* | "squash! "* | "amend! "*) ok=1 ;;
+  esac
+  if [ $ok = 0 ] && printf '%s\n' "$header" | grep -Eq "$re" && [ "${#header}" -le 100 ]; then ok=1; fi
+  if [ $ok = 0 ]; then
+    {
+      echo "commit-msg: header is not a Conventional Commit:"
+      echo "    $header"
+      echo
+      echo "  Format : <type>[(scope)][!]: <subject>      (max 100 chars)"
+      echo "  Types  : feat fix docs style refactor perf test build ci chore revert"
+      echo "  Example: feat(sync): fast-forward clean branches"
+      echo "  Breaking change: add '!' before the colon, e.g. feat!: drop v1 API"
+      echo "  Also accepted: Merge ..., Revert ..., fixup!/squash!/amend! ..."
+      echo
+      echo "  Fix with: git commit --amend      (or bypass once: --no-verify)"
+    } >&2
+    exit 1
+  fi
+fi
+dot_chain "$HOOK" "$@"
+exit 0

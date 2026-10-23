@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# post-commit: kick `git-sync --hook` in the background (throttled, never blocks, never
+# fails the git command). Then chain to the repo's own hook.
+HOOK=post-commit
+HERE=$(cd -P "$(dirname "$0")" && pwd)
+# shellcheck source=../../lib/common.sh
+. "$HERE/../../lib/common.sh" 2>/dev/null || {
+  h="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/$HOOK"
+  [ -x "$h" ] && exec "$h" "$@"
+  exit 0
+}
+
+. "$HERE/_kick-sync"
+dot_chain "$HOOK" "$@"
+exit 0

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# pre-commit (feature hooks.secretScan, on in every profile): block secrets,
+# plaintext .env files and oversized files, then chain to the repo's own hook.
+# Bypass: --no-verify. Exempt repos or hooks.secretScan=false: no-op.
+HOOK=pre-commit
+HERE=$(cd -P "$(dirname "$0")" && pwd)
+# shellcheck source=../../lib/common.sh
+. "$HERE/../../lib/common.sh" 2>/dev/null || {
+  h="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/$HOOK"
+  [ -x "$h" ] && exec "$h" "$@"
+  exit 0
+}
+
+MAX_BYTES=${GIT_MAX_FILE_BYTES:-5242880}
+problems=()
+
+scan_builtin() {
+  # Added lines only, as "path:line:content" in a temp file; report rule+location,
+  # never the secret itself.
+  local tmp names=() res=() flags=() i hits
+  tmp=$(mktemp "${TMPDIR:-/tmp}/precommit.XXXXXX") || return 0
+  git diff --cached -U0 --no-color --diff-filter=ACMR | awk '
+    /^\+\+\+ b\// { file = substr($0, 7); next }
+    /^\+\+\+ /    { file = ""; next }
+    /^@@ /        { split($3, a, ","); ln = substr(a[1], 2) + 0; next }
+    /^\+/         { if (file != "") { print file ":" ln ":" substr($0, 2) }; ln++ }
+  ' | grep -v -e 'op://' -e 'secret-scan:allow' -e 'gitleaks:allow' >"$tmp"
+  names+=("AWS access key id")
+  flags+=("-E")
+  res+=('(^|[^A-Za-z0-9])(AKIA|ASIA|AGPA|AIDA|AROA|ANPA)[A-Z0-9]{16}([^A-Za-z0-9]|$)')
+  names+=("GitHub token")
+  flags+=("-E")
+  res+=('gh[pousr]_[A-Za-z0-9]{36,}')
+  names+=("GitHub fine-grained PAT")
+  flags+=("-E")
+  res+=('github_pat_[A-Za-z0-9_]{50,}')
+  names+=("Slack token")
+  flags+=("-E")
+  res+=('xox[abprs]-[A-Za-z0-9-]{10,}')
+  names+=("Stripe secret key")
+  flags+=("-E")
+  res+=('[sr]k_(live|test)_[A-Za-z0-9]{16,}')
+  names+=("Google API key")
+  flags+=("-E")
+  res+=('AIza[0-9A-Za-z_-]{35}')
+  names+=("Anthropic API key")
+  flags+=("-E")
+  res+=('sk-ant-[A-Za-z0-9_-]{20,}')
+  names+=("OpenAI-style API key")
+  flags+=("-E")
+  res+=('sk-(proj-)?[A-Za-z0-9_-]{32,}')
+  names+=("1Password service token")
+  flags+=("-E")
+  res+=('ops_ey[A-Za-z0-9+/=_-]{40,}')
+  names+=("Cloudflare token assign")
+  flags+=("-E")
+  res+=('(CLOUDFLARE|CF)_(API_)?(TOKEN|KEY)[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_-]{30,}')
+  names+=("Private key block")
+  flags+=("-E")
+  res+=('-----BEGIN ((RSA|EC|DSA|OPENSSH|PGP|ENCRYPTED) )?PRIVATE KEY( BLOCK)?-----')
+  names+=("JSON web token")
+  flags+=("-E")
+  res+=('eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}')
+  names+=("Generic secret assignment")
+  flags+=("-Ei")
+  res+=('(secret|token|passw(or)?d|api[_-]?key)[A-Za-z0-9_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9/+=_-]{20,}["'"'"']')
+  for i in "${!names[@]}"; do
+    # shellcheck disable=SC2086 # flags holds one option, deliberately unquoted
+    hits=$(grep ${flags[$i]} -e "${res[$i]}" "$tmp" 2>/dev/null | cut -d: -f1,2 | sort -u | tr '\n' ' ')
+    [ -n "$hits" ] && problems+=("secret (${names[$i]}) at: $hits")
+  done
+  rm -f "$tmp"
+}
+
+run_gitleaks() {
+  local out rc
+  if gitleaks help 2>&1 | grep -q '^ *git '; then
+    out=$(gitleaks git --pre-commit --staged --redact --no-banner --no-color --exit-code 1 2>&1)
+  else
+    out=$(gitleaks protect --staged --redact --no-banner --no-color --exit-code 1 2>&1)
+  fi
+  rc=$?
+  if [ $rc -ne 0 ]; then
+    problems+=("gitleaks reported findings (see below)")
+    printf '%s\n' "$out" >&2
+  fi
+}
+
+if dot_feature secretScan && ! dot_is_exempt; then
+  # 1. .env* files and oversized files (index content, handles renames/adds).
+  while IFS= read -r -d '' f; do
+    base=${f##*/}
+    case $base in
+      *.example | *.sample) ;; # templates are fine: .env.example, .env.sample
+      .env | .env.*) problems+=("$f: plaintext .env files must not be committed (only *.example / *.sample templates are allowed)") ;;
+    esac
+    size=$(git cat-file -s ":$f" 2>/dev/null || echo 0)
+    if [ "$size" -gt "$MAX_BYTES" ] 2>/dev/null; then
+      problems+=("$f: $size bytes exceeds limit of $MAX_BYTES (set GIT_MAX_FILE_BYTES to override once)")
+    fi
+  done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+  # 2. secret scan
+  # Built-in scanner always runs (cheap, no dependency); gitleaks adds its much
+  # larger rule set and entropy checks when installed.
+  scan_builtin
+  if [ "${DOTFILES_SECRET_SCANNER:-}" != builtin ] && command -v gitleaks >/dev/null 2>&1; then
+    run_gitleaks
+  fi
+
+  if [ ${#problems[@]} -gt 0 ]; then
+    {
+      echo "pre-commit: commit blocked:"
+      for p in "${problems[@]}"; do echo "  - $p"; done
+      echo
+      echo "  Unstage with: git restore --staged <file>   | false positive on a line: add 'secret-scan:allow'"
+      echo "  Keep secrets out of git: reference them (e.g. op.refs with op://example-vault/example-item/field,"
+      echo "  run as: op run --env-file=op.refs -- <cmd>) or inject them from your secret manager at runtime."
+      echo "  Bypass once (you own the risk): git commit --no-verify"
+    } >&2
+    exit 1
+  fi
+fi
+dot_chain "$HOOK" "$@"
+exit 0

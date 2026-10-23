@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# pre-push: two independent features, then chain (stdin is replayed to the
+# repo's own pre-push).
+#   hooks.branchName  branch names must match hooks.branchNamePattern (ERE;
+#                     default type/[issue-]slug). main/master are not checked.
+#   hooks.protectMain no direct pushes to main/master, never force-push or
+#                     delete them. Escape hatch for direct pushes:
+#                     GIT_ALLOW_MAIN_PUSH=1. Bypass everything: --no-verify.
+HOOK=pre-push
+HERE=$(cd -P "$(dirname "$0")" && pwd)
+# shellcheck source=../../lib/common.sh
+. "$HERE/../../lib/common.sh" 2>/dev/null || {
+  h="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/$HOOK"
+  [ -x "$h" ] && exec "$h" "$@"
+  exit 0
+}
+
+stdin_file=$(mktemp "${TMPDIR:-/tmp}/prepush.XXXXXX") || exit 0
+trap 'rm -f "$stdin_file"' EXIT
+cat >"$stdin_file"
+export HOOK_STDIN_FILE=$stdin_file
+
+zero=0000000000000000000000000000000000000000
+types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+default_re="^($types)/([0-9]+-)?[a-z0-9][a-z0-9-]*\$"
+bad=()
+
+use_names=0 use_main=0
+dot_feature branchName && use_names=1
+dot_feature protectMain && use_main=1
+if { [ $use_names = 1 ] || [ $use_main = 1 ]; } && ! dot_is_exempt; then
+  name_re=$(git config --get hooks.branchNamePattern 2>/dev/null)
+  name_re=${name_re:-$default_re}
+  while read -r _lref lsha rref rsha; do
+    [ -z "${rref:-}" ] && continue
+    case $rref in refs/heads/*) ;; *) continue ;; esac
+    b=${rref#refs/heads/}
+    deleting=0
+    case $lsha in "$zero"*) deleting=1 ;; esac
+    case $b in
+      main | master)
+        [ $use_main = 1 ] || continue
+        if [ $deleting = 1 ]; then
+          bad+=("$b: deleting the default branch is not allowed")
+          continue
+        fi
+        if [ "$rsha" != "${zero}" ] && git cat-file -e "$rsha^{commit}" 2>/dev/null &&
+          ! git merge-base --is-ancestor "$rsha" "$lsha" 2>/dev/null; then
+          bad+=("$b: force-push (non fast-forward) to $b is never allowed")
+          continue
+        fi
+        if [ "${GIT_ALLOW_MAIN_PUSH:-}" != 1 ]; then
+          bad+=("$b: direct pushes to $b are blocked; push a branch and open a PR (override once: GIT_ALLOW_MAIN_PUSH=1)")
+        fi
+        ;;
+      *)
+        [ $use_names = 1 ] || continue
+        [ $deleting = 1 ] && continue
+        if ! printf '%s\n' "$b" | grep -Eq -e "$name_re"; then
+          bad+=("$b: branch name must match $name_re")
+        fi
+        ;;
+    esac
+  done <"$stdin_file"
+  if [ ${#bad[@]} -gt 0 ]; then
+    {
+      echo "pre-push: push blocked:"
+      for p in "${bad[@]}"; do echo "  - $p"; done
+      echo
+      echo "  Default branch pattern: $types / [issue-number-]lower-case-slug   e.g. feat/123-git-sync"
+      echo "  Change it: git config hooks.branchNamePattern '<ERE>'   Turn off: git config hooks.branchName false"
+      echo "  Rename: git branch -m <new-name>   then   git push -u origin <new-name>"
+      echo "  Bypass once: git push --no-verify"
+    } >&2
+    exit 1
+  fi
+fi
+dot_chain "$HOOK" "$@"
+exit 0
