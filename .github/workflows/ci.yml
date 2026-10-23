@@ -18,20 +18,18 @@ env:
 jobs:
   # Runner picker: prefers the self-hosted Mac Studio (when online, idle and the event is a trusted
   # same-repo one), else the fallback label. Fork PRs never reach the Studio. See shared-config docs/RUNNERS.md.
-  # Fallback is macos-latest (free on public repos) so the macOS leg always runs on macOS.
   pick:
     uses: tyler-jewell/shared-config/.github/workflows/select-runner.yml@v1
     permissions:
       contents: read
-    with:
-      fallback: macos-latest
     secrets:
       runner-status-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
 
-  # macOS leg: Studio (arm64) when available, else hosted macos-latest.
+  # macOS leg: runs only when the self-hosted Mac Studio was picked. Otherwise we fall back to Linux (test-linux).
   test-macos:
     name: test (macos)
     needs: pick
+    if: needs.pick.outputs.selfhosted == 'true'
     runs-on: ${{ fromJSON(needs.pick.outputs.runs-on) }}
     timeout-minutes: 15
     steps:
