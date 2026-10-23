@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.sh text eol=lf
+bin/* text eol=lf
+git/hooks/* text eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+# Keep release tarballs (git archive) free of repo-only files
+.github/ export-ignore
+.gitattributes export-ignore
+.editorconfig export-ignore

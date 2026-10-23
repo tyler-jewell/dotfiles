@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+# git config syntax conventionally uses tabs
+[{git/config,git/presets,git/hooks.inc,templates/config.example}]
+indent_style = tab
+
+# shfmt reads these for every shell script (including extension-less ones)
+[{*.sh,bin/*,git/hooks/*,install.sh}]
+shell_variant = bash
+switch_case_indent = true

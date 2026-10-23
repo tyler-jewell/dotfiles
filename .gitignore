@@ -1,0 +1,13 @@
+# Never commit machine-specific or secret files
+*.log
+.DS_Store
+# plaintext env files; templates (*.example, *.sample) and op.refs are fine
+.env
+.env.*
+!.env.example
+!.env.sample
+!*.example
+!*.sample
+!op.refs
+# release build output
+/dist/

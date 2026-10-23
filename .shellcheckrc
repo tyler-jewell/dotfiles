@@ -1,0 +1,6 @@
+# Applies to ShellCheck run from the repository root: shellcheck -x <files>
+shell=bash
+external-sources=true
+source-path=SCRIPTDIR
+# Deliberate style: `A && B || C` chains report-and-continue; ls is used in tests.
+disable=SC2015,SC2012,SC2016
